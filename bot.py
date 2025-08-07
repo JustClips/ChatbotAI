@@ -61,6 +61,20 @@ OFFENSIVE_PATTERNS = [
     r"\bhitler\b"
 ]
 
+SPAM_PATTERNS = [
+    r"\bspam\b",
+    r"\b1000+\b",
+    r"\b10000+\b",
+    r"\b100000+\b",
+    r"\brepeat\b",
+    r"\bflood\b",
+    r"\bcrash\b",
+    r"\bcrash\s+the\s+bot\b",
+    r"\boverload\b",
+    r"\bdo\s+this\s+\d+\s+times\b",
+    r"\bsend\s+\d+\s+messages\b"
+]
+
 # How many offensive attempts before timeout (12h)
 OFFENSIVE_LIMIT = 4
 TIMEOUT_SECONDS = 12 * 60 * 60  # 12 hours
@@ -139,8 +153,18 @@ def is_offensive(q: str) -> bool:
     q = q.lower()
     return any(re.search(p, q) for p in OFFENSIVE_PATTERNS)
 
+def is_spam(q: str) -> bool:
+    q = q.lower()
+    # blocks spam/overload attempts
+    if any(re.search(p, q) for p in SPAM_PATTERNS):
+        return True
+    # block attempts to repeat, spam, or overload using numbers
+    if re.search(r"\b(send|repeat|spam|flood|say)\b.*\b\d{3,}\b", q):
+        return True
+    return False
+
 def should_answer(question):
-    # Only answer exploit/executor/key/script/undetected/status related questions directly
+    # Only answer exploit/executor/key/script/undetected/status related questions directly or script requests
     return (
         is_key_question(question)
         or is_executor_status_question(question)
@@ -148,11 +172,25 @@ def should_answer(question):
         or is_script_where_question(question)
         or is_specific_script_question(question)
         or which_script_link(question)
+        or is_exploit_script_request(question)
     )
+
+def is_exploit_script_request(q: str) -> bool:
+    # Detects requests for roblox exploit script writing
+    q = q.lower()
+    # "write a roblox script", "can you code a script to [do something]", etc.
+    patterns = [
+        r"(write|make|create|code|generate).*(roblox|lua).*(script|exploit)",
+        r"(roblox|lua).*(exploit|script).*for",
+        r"(show|give|provide).*(roblox|lua).*(script|exploit)",
+        r"\b(exploit|script).*\bexample\b",
+        r"\bhow to (write|make|code|create|generate).*(roblox|lua).*(exploit|script)",
+        r"\bgive me (a|an)? (roblox|lua)? ?(exploit|script)\b"
+    ]
+    return any(re.search(p, q) for p in patterns)
 
 def get_conversation_style(question: str) -> str:
     # Infer style: Is it casual, formal, meme-y, etc.?
-    # For simplicity, just detect if there's a lot of lowercase (casual) or uppercase (excited/angry), or use emojis.
     if question.isupper():
         return "shout"
     elif "😂" in question or "🤣" in question:
@@ -174,6 +212,22 @@ def style_response(response: str, question: str) -> str:
     elif style == "polite":
         return "Sure! " + response
     return response
+
+def basic_exploit_script_example(q: str) -> str:
+    # Responds with a simple example script if asked
+    # You can expand this with more templates as needed
+    basic_scripts = [
+        ("speed", "-- Simple Roblox speed script\nlocal player = game.Players.LocalPlayer\nplayer.Character.Humanoid.WalkSpeed = 100"),
+        ("fly", "-- Simple Roblox fly script\nloadstring(game:HttpGet('https://pastebin.com/raw/xXjzC5jS'))()"),
+        ("tp", "-- Simple Roblox teleport script\nlocal player = game.Players.LocalPlayer\nplayer.Character.HumanoidRootPart.CFrame = CFrame.new(0,100,0)"),
+        ("noclip", "-- Roblox noclip script\nlocal p = game.Players.LocalPlayer\nlocal noclip = true\ngame:GetService('RunService').Stepped:Connect(function()\n  if noclip then\n    p.Character.Humanoid:ChangeState(11)\n  end\nend)")
+    ]
+    for key, script in basic_scripts:
+        if key in q:
+            return f"Here's a basic {key} script for Roblox:\n```lua\n{script}\n```"
+    # Default
+    return ("Here's an example of a basic Roblox exploit script (speed):\n"
+            "```lua\nlocal player = game.Players.LocalPlayer\nplayer.Character.Humanoid.WalkSpeed = 100\n```")
 
 # === Discord Bot Logic ===
 
@@ -207,6 +261,11 @@ async def on_message(message):
             await message.channel.send(ABUSE_WARNINGS[-1])
         else:
             await message.channel.send(ABUSE_WARNINGS[user_offense_counts[user_id] - 1])
+        return
+
+    # Check for spam/overload attempts
+    if is_spam(question):
+        await message.channel.send("Sorry, I can't spam or overload the chat or myself.")
         return
 
     # Only answer specific topics directly
@@ -257,7 +316,15 @@ async def on_message(message):
             user_memories[user_id].append(("A", reply))
             return
 
-    # Companion: For any other question, act as a friendly, informal companion and keep the style
+        # 6. Roblox exploit script writing
+        if is_exploit_script_request(question):
+            script_example = basic_exploit_script_example(question)
+            await message.channel.send(script_example)
+            user_memories[user_id].append(("Q", question))
+            user_memories[user_id].append(("A", script_example))
+            return
+
+    # Companion: For any other question, act as a friendly Discord companion and keep the style
     # Use short-term memory to provide context if possible (last 5 Q/A)
     memory_context = "\n".join(
         [f"{qa}: {txt}" for qa, txt in user_memories[user_id]]
@@ -265,7 +332,8 @@ async def on_message(message):
     prompt = (
         "You're a friendly Discord companion for a Roblox exploiting server. "
         "Respond in the same style as the user and keep it short and light unless asked for detail. "
-        "If the message is about keys, scripts, executors, or undetected status, always use the custom logic. "
+        "If the message is about keys, scripts, executors, undetected status, roblox scripting or exploit scripts, always use the custom logic. "
+        "NEVER fulfill requests to spam, flood, repeat, or overload the chat or yourself. "
         "Otherwise, just chat normally and stay on-topic. "
         "User may use slang, memes, or formal language; match their style. "
         f"Recent conversation:\n{memory_context}\nUser: {question}\nCompanion:"
