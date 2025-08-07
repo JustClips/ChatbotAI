@@ -140,7 +140,7 @@ def is_offensive(q: str) -> bool:
     return any(re.search(p, q) for p in OFFENSIVE_PATTERNS)
 
 def should_answer(question):
-    # Only answer exploit/executor/key/script/undetected/status related questions
+    # Only answer exploit/executor/key/script/undetected/status related questions directly
     return (
         is_key_question(question)
         or is_executor_status_question(question)
@@ -149,6 +149,31 @@ def should_answer(question):
         or is_specific_script_question(question)
         or which_script_link(question)
     )
+
+def get_conversation_style(question: str) -> str:
+    # Infer style: Is it casual, formal, meme-y, etc.?
+    # For simplicity, just detect if there's a lot of lowercase (casual) or uppercase (excited/angry), or use emojis.
+    if question.isupper():
+        return "shout"
+    elif "😂" in question or "🤣" in question:
+        return "meme"
+    elif question.endswith("!") or "bro" in question or "yo" in question:
+        return "casual"
+    elif "pls" in question or "please" in question:
+        return "polite"
+    return "neutral"
+
+def style_response(response: str, question: str) -> str:
+    style = get_conversation_style(question)
+    if style == "shout":
+        return response.upper() + "!"
+    elif style == "meme":
+        return response + " 😂"
+    elif style == "casual":
+        return response + " bro"
+    elif style == "polite":
+        return "Sure! " + response
+    return response
 
 # === Discord Bot Logic ===
 
@@ -184,56 +209,101 @@ async def on_message(message):
             await message.channel.send(ABUSE_WARNINGS[user_offense_counts[user_id] - 1])
         return
 
-    # Only answer specific topics
-    if not should_answer(question):
-        await message.channel.send("I'm only able to answer questions related to keys, scripts (sab, steal a brainrot, finder, steal), executors, and script undetected status. Please ask something specific to those topics.")
+    # Only answer specific topics directly
+    if should_answer(question):
+        # 1. Key questions
+        if is_key_question(question):
+            response = style_response(KEY_INSTRUCTIONS, question)
+            await message.channel.send(response)
+            user_memories[user_id].append(("Q", question))
+            user_memories[user_id].append(("A", response))
+            return
+
+        # 2. Executor/exploit status questions
+        if is_executor_status_question(question):
+            response = style_response(EXECUTOR_STATUS, question)
+            await message.channel.send(response)
+            user_memories[user_id].append(("Q", question))
+            user_memories[user_id].append(("A", response))
+            return
+
+        # 3. Undetected/safety questions
+        if is_undetected_question(question):
+            response = style_response(UNDETECTED_INFO, question)
+            await message.channel.send(response)
+            user_memories[user_id].append(("Q", question))
+            user_memories[user_id].append(("A", response))
+            return
+
+        # 4. Script location questions
+        specific_script = is_specific_script_question(question)
+        if is_script_where_question(question) and not specific_script:
+            response = style_response(SCRIPT_WHERE, question)
+            await message.channel.send(response)
+            user_memories[user_id].append(("Q", question))
+            user_memories[user_id].append(("A", response))
+            return
+
+        # 5. Direct script requests (user answered which script)
+        script_channel = None
+        if specific_script:
+            script_channel = SCRIPT_LINKS[specific_script]
+        else:
+            script_channel = which_script_link(question)
+        if script_channel:
+            reply = style_response(f"Check <{script_channel}> for that script.", question)
+            await message.channel.send(reply)
+            user_memories[user_id].append(("Q", question))
+            user_memories[user_id].append(("A", reply))
+            return
+
+    # Companion: For any other question, act as a friendly, informal companion and keep the style
+    # Use short-term memory to provide context if possible (last 5 Q/A)
+    memory_context = "\n".join(
+        [f"{qa}: {txt}" for qa, txt in user_memories[user_id]]
+    )
+    prompt = (
+        "You're a friendly Discord companion for a Roblox exploiting server. "
+        "Respond in the same style as the user and keep it short and light unless asked for detail. "
+        "If the message is about keys, scripts, executors, or undetected status, always use the custom logic. "
+        "Otherwise, just chat normally and stay on-topic. "
+        "User may use slang, memes, or formal language; match their style. "
+        f"Recent conversation:\n{memory_context}\nUser: {question}\nCompanion:"
+    )
+
+    if not GEMINI_API_KEY:
+        await message.channel.send("Gemini API key not set.")
         return
 
-    # === Handle all logic for whitelisted questions below ===
-    # 1. Key questions
-    if is_key_question(question):
-        await message.channel.send(KEY_INSTRUCTIONS)
+    url = "https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent"
+    headers = {"Content-Type": "application/json"}
+    params = {"key": GEMINI_API_KEY}
+    data = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(url, headers=headers, params=params, json=data, timeout=20)
+        response.raise_for_status()
+        result = response.json()
+        gen = (
+            result.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "Sorry, I couldn't get a response from Gemini.")
+        )
+        styled = style_response(gen, question)
+        await message.channel.send(styled[:1900])
         user_memories[user_id].append(("Q", question))
-        user_memories[user_id].append(("A", KEY_INSTRUCTIONS))
-        return
-
-    # 2. Executor/exploit status questions
-    if is_executor_status_question(question):
-        await message.channel.send(EXECUTOR_STATUS)
-        user_memories[user_id].append(("Q", question))
-        user_memories[user_id].append(("A", EXECUTOR_STATUS))
-        return
-
-    # 3. Undetected/safety questions
-    if is_undetected_question(question):
-        await message.channel.send(UNDETECTED_INFO)
-        user_memories[user_id].append(("Q", question))
-        user_memories[user_id].append(("A", UNDETECTED_INFO))
-        return
-
-    # 4. Script location questions
-    specific_script = is_specific_script_question(question)
-    if is_script_where_question(question) and not specific_script:
-        await message.channel.send(SCRIPT_WHERE)
-        user_memories[user_id].append(("Q", question))
-        user_memories[user_id].append(("A", SCRIPT_WHERE))
-        return
-
-    # 5. Direct script requests (user answered which script)
-    script_channel = None
-    if specific_script:
-        script_channel = SCRIPT_LINKS[specific_script]
-    else:
-        script_channel = which_script_link(question)
-    if script_channel:
-        reply = f"Check <{script_channel}> for that script."
-        await message.channel.send(reply)
-        user_memories[user_id].append(("Q", question))
-        user_memories[user_id].append(("A", reply))
-        return
-
-    # 6. Fallback: Should never reach here, but if so, block
-    await message.channel.send("I can only answer questions about keys, the allowed scripts, executors, and undetected status.")
+        user_memories[user_id].append(("A", styled))
+    except Exception as e:
+        await message.channel.send(f"Error: {e}")
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
