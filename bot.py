@@ -2,9 +2,11 @@ import os
 import discord
 import requests
 
+# Set up Discord intents
 intents = discord.Intents.default()
 intents.message_content = True
 
+# Load environment variables
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ALLOWED_CHANNEL_ID = int(os.getenv("ALLOWED_CHANNEL_ID", "0"))  # Set your channel ID in env
@@ -21,10 +23,11 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # Only respond in the allowed channel
     if message.channel.id != ALLOWED_CHANNEL_ID:
         return
 
-    # Check if message starts with !
+    # Only respond to messages that start with !
     if message.content.startswith("!"):
         question = message.content[1:].strip()
         if not question:
@@ -35,17 +38,30 @@ async def on_message(message):
             await message.channel.send("Gemini API key not set.")
             return
 
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+        url = "https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent"
         headers = {"Content-Type": "application/json"}
-        data = {
-            "contents": [{"parts": [{"text": question}]}]
-        }
         params = {"key": GEMINI_API_KEY}
+        data = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": question}
+                    ]
+                }
+            ]
+        }
+
         try:
             response = requests.post(url, headers=headers, params=params, json=data, timeout=20)
             response.raise_for_status()
             result = response.json()
-            gen = result["candidates"][0]["content"]["parts"][0]["text"]
+            # Try to get the generated text safely
+            gen = (
+                result.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "Sorry, I couldn't get a response from Gemini.")
+            )
             await message.channel.send(gen[:1900])
         except Exception as e:
             await message.channel.send(f"Error: {e}")
@@ -53,5 +69,7 @@ async def on_message(message):
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         print("DISCORD_TOKEN environment variable not set.")
+    elif not ALLOWED_CHANNEL_ID:
+        print("ALLOWED_CHANNEL_ID environment variable not set or is 0.")
     else:
         client.run(DISCORD_TOKEN)
