@@ -2,6 +2,8 @@ import os
 import discord
 import requests
 import re
+import time
+from collections import defaultdict, deque
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -11,6 +13,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ALLOWED_CHANNEL_ID = int(os.getenv("ALLOWED_CHANNEL_ID", "0"))
 
 client = discord.Client(intents=intents)
+
+# === Custom Instructions and Config ===
 
 KEY_INSTRUCTIONS = (
     "The key is on the website https://w1ckllon.com/ .\n"
@@ -26,17 +30,52 @@ UNDETECTED_INFO = (
 SCRIPT_WHERE = (
     "Which script are you looking for?"
 )
+SCRIPT_CHANNEL = "#1400830782347677758"
 SCRIPT_LINKS = {
-    "sab": "#1400830782347677758",
-    "steal a brainrot": "#1400830782347677758",
-    "finder": "#1400830782347677758",
-    "steal": "#1400830782347677758"
+    "sab": SCRIPT_CHANNEL,
+    "steal a brainrot": SCRIPT_CHANNEL,
+    "finder": SCRIPT_CHANNEL,
+    "steal": SCRIPT_CHANNEL
 }
-# Add more script aliases as needed
+ABUSE_WARNINGS = [
+    "I'm not able to answer that.",
+    "I'm not able to answer that. Please do not use offensive or hateful language.",
+    "I'm not able to answer that. Continued attempts may result in being ignored temporarily.",
+    "You have repeatedly sent offensive or hateful messages. You will be ignored for 12 hours."
+]
+OFFENSIVE_PATTERNS = [
+    r"\bnigger\b",
+    r"\bfaggot\b",
+    r"\bretard\b",
+    r"\bfag\b",
+    r"\btranny\b",
+    r"\bcoon\b",
+    r"\bchink\b",
+    r"\bspic\b",
+    r"\bkike\b",
+    r"\bdyke\b",
+    r"\bslut\b",
+    r"\bcunt\b",
+    r"\bnazi\b",
+    r"\bheil\b",
+    r"\bhitler\b"
+]
+
+# How many offensive attempts before timeout (12h)
+OFFENSIVE_LIMIT = 4
+TIMEOUT_SECONDS = 12 * 60 * 60  # 12 hours
+
+# Track offensive attempts and timeouts per user
+user_offense_counts = defaultdict(int)
+user_timeout_until = defaultdict(float)
+
+# Simple short-term memory for each user (last 5 Q/A pairs)
+user_memories = defaultdict(lambda: deque(maxlen=5))
+
+# === Utility Functions ===
 
 def is_key_question(q: str) -> bool:
     q = q.lower()
-    # match various ways to ask about the key
     patterns = [
         r'\bhow (do i|to) (get|generate|find|obtain|make).*\bkey\b',
         r'\bwhere (is|can i get|to get|do i get).*\bkey\b',
@@ -48,7 +87,6 @@ def is_key_question(q: str) -> bool:
 
 def is_executor_status_question(q: str) -> bool:
     q = q.lower()
-    # common phrasings for executor status
     patterns = [
         r'(which|what).*(executor|exploit).*work(ing)?',
         r'(which|what).*(executor|exploit).*up',
@@ -61,26 +99,34 @@ def is_executor_status_question(q: str) -> bool:
 
 def is_undetected_question(q: str) -> bool:
     q = q.lower()
-    # questions about undetected status
     patterns = [
         r'is.*script.*undetected',
         r'undetected.*script',
         r'is.*undetect(ed|able)',
         r'safe.*use',
         r'ban.*risk',
+        r'undetected.*(for|on).*game'
     ]
     return any(re.search(p, q) for p in patterns)
 
 def is_script_where_question(q: str) -> bool:
     q = q.lower()
-    # where to find script
     patterns = [
         r'where.*script',
         r'find.*script',
         r'get.*script',
         r'script.*where',
+        r'how.*get.*script'
     ]
     return any(re.search(p, q) for p in patterns)
+
+def is_specific_script_question(q: str) -> str:
+    q = q.lower()
+    # E.g. "how to get sab script", "how to get steal a brainrot script"
+    for name in SCRIPT_LINKS.keys():
+        if name in q and "script" in q and any(w in q for w in ["get", "find", "where", "download"]):
+            return name
+    return None
 
 def which_script_link(q: str):
     q = q.lower()
@@ -88,6 +134,23 @@ def which_script_link(q: str):
         if name in q:
             return channel
     return None
+
+def is_offensive(q: str) -> bool:
+    q = q.lower()
+    return any(re.search(p, q) for p in OFFENSIVE_PATTERNS)
+
+def should_answer(question):
+    # Only answer exploit/executor/key/script/undetected/status related questions
+    return (
+        is_key_question(question)
+        or is_executor_status_question(question)
+        or is_undetected_question(question)
+        or is_script_where_question(question)
+        or is_specific_script_question(question)
+        or which_script_link(question)
+    )
+
+# === Discord Bot Logic ===
 
 @client.event
 async def on_ready():
@@ -99,68 +162,78 @@ async def on_message(message):
         return
     if message.channel.id != ALLOWED_CHANNEL_ID:
         return
-    if message.content.startswith("!"):
-        question = message.content[1:].strip()
-        if not question:
-            await message.channel.send("Please enter a question after the !")
-            return
+    if not message.content.startswith("!"):
+        return
 
-        # Handle key questions
-        if is_key_question(question):
-            await message.channel.send(KEY_INSTRUCTIONS)
-            return
+    user_id = message.author.id
+    question = message.content[1:].strip()
 
-        # Handle executor status questions
-        if is_executor_status_question(question):
-            await message.channel.send(EXECUTOR_STATUS)
-            return
+    # Check for timeout
+    now = time.time()
+    if user_id in user_timeout_until and user_timeout_until[user_id] > now:
+        await message.channel.send("You are temporarily ignored due to repeated offensive language. Please try again later.")
+        return
 
-        # Handle undetected/script safety questions
-        if is_undetected_question(question):
-            await message.channel.send(UNDETECTED_INFO)
-            return
+    # Check for offensive message
+    if is_offensive(question):
+        user_offense_counts[user_id] += 1
+        if user_offense_counts[user_id] >= OFFENSIVE_LIMIT:
+            user_timeout_until[user_id] = now + TIMEOUT_SECONDS
+            await message.channel.send(ABUSE_WARNINGS[-1])
+        else:
+            await message.channel.send(ABUSE_WARNINGS[user_offense_counts[user_id] - 1])
+        return
 
-        # Handle 'where script' questions
-        if is_script_where_question(question):
-            await message.channel.send(SCRIPT_WHERE)
-            return
+    # Only answer specific topics
+    if not should_answer(question):
+        await message.channel.send("I'm only able to answer questions related to keys, scripts (sab, steal a brainrot, finder, steal), executors, and script undetected status. Please ask something specific to those topics.")
+        return
 
-        # If user answered with a script name, reply with the channel
+    # === Handle all logic for whitelisted questions below ===
+    # 1. Key questions
+    if is_key_question(question):
+        await message.channel.send(KEY_INSTRUCTIONS)
+        user_memories[user_id].append(("Q", question))
+        user_memories[user_id].append(("A", KEY_INSTRUCTIONS))
+        return
+
+    # 2. Executor/exploit status questions
+    if is_executor_status_question(question):
+        await message.channel.send(EXECUTOR_STATUS)
+        user_memories[user_id].append(("Q", question))
+        user_memories[user_id].append(("A", EXECUTOR_STATUS))
+        return
+
+    # 3. Undetected/safety questions
+    if is_undetected_question(question):
+        await message.channel.send(UNDETECTED_INFO)
+        user_memories[user_id].append(("Q", question))
+        user_memories[user_id].append(("A", UNDETECTED_INFO))
+        return
+
+    # 4. Script location questions
+    specific_script = is_specific_script_question(question)
+    if is_script_where_question(question) and not specific_script:
+        await message.channel.send(SCRIPT_WHERE)
+        user_memories[user_id].append(("Q", question))
+        user_memories[user_id].append(("A", SCRIPT_WHERE))
+        return
+
+    # 5. Direct script requests (user answered which script)
+    script_channel = None
+    if specific_script:
+        script_channel = SCRIPT_LINKS[specific_script]
+    else:
         script_channel = which_script_link(question)
-        if script_channel:
-            await message.channel.send(f"Check <{script_channel}> for that script.")
-            return
+    if script_channel:
+        reply = f"Check <{script_channel}> for that script."
+        await message.channel.send(reply)
+        user_memories[user_id].append(("Q", question))
+        user_memories[user_id].append(("A", reply))
+        return
 
-        if not GEMINI_API_KEY:
-            await message.channel.send("Gemini API key not set.")
-            return
-
-        url = "https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent"
-        headers = {"Content-Type": "application/json"}
-        params = {"key": GEMINI_API_KEY}
-        data = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": question}
-                    ]
-                }
-            ]
-        }
-
-        try:
-            response = requests.post(url, headers=headers, params=params, json=data, timeout=20)
-            response.raise_for_status()
-            result = response.json()
-            gen = (
-                result.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "Sorry, I couldn't get a response from Gemini.")
-            )
-            await message.channel.send(gen[:1900])
-        except Exception as e:
-            await message.channel.send(f"Error: {e}")
+    # 6. Fallback: Should never reach here, but if so, block
+    await message.channel.send("I can only answer questions about keys, the allowed scripts, executors, and undetected status.")
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
